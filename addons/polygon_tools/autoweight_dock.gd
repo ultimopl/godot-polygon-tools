@@ -9,6 +9,7 @@ var _undo_redo: EditorUndoRedoManager
 
 var _target: Polygon2D = null
 var _skeleton: Node = null # Skeleton2D (or any node holding Bone2D children)
+var _sprite: Sprite2D = null # first selected Sprite2D, for the auto-mesher
 
 var _target_label: Label
 var _skeleton_label: Label
@@ -26,7 +27,20 @@ var _calc_button: Button
 var _smooth_button: Button
 var _recalc_button: Button
 var _subdivide_button: Button
+var _copy_uv_button: Button
 var _status_label: RichTextLabel
+
+# Skeleton Templates section
+var _template_option: OptionButton
+var _segments_spin: SpinBox
+var _create_skel_button: Button
+
+# Auto-Mesh section
+var _alpha_spin: SpinBox
+var _simplify_spin: SpinBox
+var _min_area_spin: SpinBox
+var _split_check: CheckBox
+var _gen_mesh_button: Button
 
 
 func setup(editor_interface: EditorInterface, undo_redo: EditorUndoRedoManager) -> void:
@@ -79,21 +93,85 @@ func _build_ui() -> void:
 
 	vb.add_child(HSeparator.new())
 
-	_radius_spin = _add_spin(vb, "Envelope radius", 0.1, 3.0, 0.05, 1.0)
+	# Collapsible sections, top to bottom in workflow order.
+	_build_templates_section(vb)
+	_build_mesh_section(vb)
+	_build_weights_section(vb)
+	_build_meshtools_section(vb)
+
+	_status_label = RichTextLabel.new()
+	_status_label.fit_content = true
+	_status_label.bbcode_enabled = true
+	_status_label.custom_minimum_size = Vector2(0, 60)
+	vb.add_child(_status_label)
+
+
+## Wrap a section's controls in a FoldableContainer so the dock stays compact.
+## Returns the inner VBox to add controls to.
+func _add_section(parent: Node, title: String) -> VBoxContainer:
+	var fold := FoldableContainer.new()
+	fold.title = title
+	fold.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	parent.add_child(fold)
+	var box := VBoxContainer.new()
+	box.add_theme_constant_override("separation", 6)
+	box.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	fold.add_child(box)
+	return box
+
+
+func _build_templates_section(parent: Node) -> void:
+	var box := _add_section(parent, "Skeleton Templates")
+	_template_option = OptionButton.new()
+	for id in AutoWeightSkeletonTemplates.template_ids():
+		_template_option.add_item(String(id).capitalize())
+	_template_option.tooltip_text = "Rig preset to spawn. Snake/Tentacle length uses the segments count below."
+	box.add_child(_template_option)
+	_segments_spin = _add_spin(box, "Segments (snake/tentacle)", 2, 32, 1, 8)
+	_create_skel_button = Button.new()
+	_create_skel_button.text = "Create Skeleton"
+	_create_skel_button.tooltip_text = "Spawn a Skeleton2D rig, scaled to the selected Polygon2D/Sprite2D (or a default size)."
+	_create_skel_button.pressed.connect(_on_create_skeleton_pressed)
+	box.add_child(_create_skel_button)
+
+
+func _build_mesh_section(parent: Node) -> void:
+	var box := _add_section(parent, "Auto-Mesh")
+	_alpha_spin = _add_spin(box, "Alpha threshold", 0.0, 1.0, 0.05, 0.5)
+	_alpha_spin.tooltip_text = "Pixels with alpha above this count as opaque when tracing the outline."
+	_simplify_spin = _add_spin(box, "Simplify (px)", 0.0, 20.0, 0.5, 2.0)
+	_simplify_spin.tooltip_text = "Outline simplification epsilon; higher = fewer, coarser points."
+	_min_area_spin = _add_spin(box, "Min area (px2)", 0.0, 100000.0, 16.0, 64.0)
+	_min_area_spin.tooltip_text = "Drop traced parts smaller than this area."
+	_split_check = CheckBox.new()
+	_split_check.text = "Split parts"
+	_split_check.tooltip_text = "One Polygon2D per disjoint opaque region. Off = keep only the largest region."
+	_split_check.button_pressed = true
+	box.add_child(_split_check)
+	_gen_mesh_button = Button.new()
+	_gen_mesh_button.text = "Generate Mesh"
+	_gen_mesh_button.tooltip_text = "Trace Polygon2D meshes from the selected Sprite2D's texture."
+	_gen_mesh_button.pressed.connect(_on_generate_mesh_pressed)
+	box.add_child(_gen_mesh_button)
+
+
+func _build_weights_section(parent: Node) -> void:
+	var box := _add_section(parent, "Weights")
+	_radius_spin = _add_spin(box, "Envelope radius", 0.1, 3.0, 0.05, 1.0)
 	_radius_spin.tooltip_text = "Scale on each bone's capsule. Each bone is auto-sized to its own flesh region; 1.0 = exact fit, higher reaches into neighbours."
-	_max_bones_spin = _add_spin(vb, "Max bones / vertex", 1, 8, 1, 4)
+	_max_bones_spin = _add_spin(box, "Max bones / vertex", 1, 8, 1, 4)
 
 	_visibility_check = CheckBox.new()
 	_visibility_check.text = "Use visibility test"
 	_visibility_check.tooltip_text = "Ignore a bone for a vertex when the straight line to it leaves the polygon (stops cross-bend bleed)."
 	_visibility_check.button_pressed = true
-	vb.add_child(_visibility_check)
+	box.add_child(_visibility_check)
 
 	_debug_check = CheckButton.new()
 	_debug_check.text = "Debug mode"
 	_debug_check.tooltip_text = "Draw a marker (Area2D) at each detected joint area after calculating weights."
 	_debug_check.toggled.connect(_on_debug_toggled)
-	vb.add_child(_debug_check)
+	box.add_child(_debug_check)
 
 	# Blend softness: width of the transition band where two envelopes overlap.
 	var jhb := HBoxContainer.new()
@@ -104,7 +182,7 @@ func _build_ui() -> void:
 	_softness_value = Label.new()
 	_softness_value.custom_minimum_size = Vector2(32, 0)
 	jhb.add_child(_softness_value)
-	vb.add_child(jhb)
+	box.add_child(jhb)
 
 	_softness_slider = HSlider.new()
 	_softness_slider.min_value = 0.0
@@ -113,15 +191,15 @@ func _build_ui() -> void:
 	_softness_slider.value = 0.3
 	_softness_slider.tooltip_text = "How soft the capsule edge is: 0 = hard, crisp single-bone regions; 1 = wide smooth blend at the joints. Re-run Calculate Weights to apply."
 	_softness_slider.value_changed.connect(_on_softness_changed)
-	vb.add_child(_softness_slider)
+	box.add_child(_softness_slider)
 	_softness_value.text = "%.2f" % _softness_slider.value
 
-	vb.add_child(HSeparator.new())
+	box.add_child(HSeparator.new())
 
 	_calc_button = Button.new()
 	_calc_button.text = "Calculate Weights"
 	_calc_button.pressed.connect(_on_calculate_pressed)
-	vb.add_child(_calc_button)
+	box.add_child(_calc_button)
 
 	# Smooth: Laplacian-relax the current weights. Strength slider + button; each
 	# press applies one smoothing pass (click again to smooth further).
@@ -133,7 +211,7 @@ func _build_ui() -> void:
 	_smooth_value = Label.new()
 	_smooth_value.custom_minimum_size = Vector2(32, 0)
 	shb.add_child(_smooth_value)
-	vb.add_child(shb)
+	box.add_child(shb)
 
 	_smooth_slider = HSlider.new()
 	_smooth_slider.min_value = 0.0
@@ -142,32 +220,35 @@ func _build_ui() -> void:
 	_smooth_slider.value = 0.5
 	_smooth_slider.tooltip_text = "How hard each Smooth pass pulls every vertex's weights toward its mesh neighbours' average."
 	_smooth_slider.value_changed.connect(_on_smooth_changed)
-	vb.add_child(_smooth_slider)
+	box.add_child(_smooth_slider)
 	_smooth_value.text = "%.2f" % _smooth_slider.value
 
 	_smooth_button = Button.new()
 	_smooth_button.text = "Smooth Weights"
 	_smooth_button.tooltip_text = "Relax the polygon's current bone weights over the mesh (blends each vertex toward its neighbours). Click repeatedly for more."
 	_smooth_button.pressed.connect(_on_smooth_pressed)
-	vb.add_child(_smooth_button)
+	box.add_child(_smooth_button)
 
+
+func _build_meshtools_section(parent: Node) -> void:
+	var box := _add_section(parent, "Mesh Tools")
 	_recalc_button = Button.new()
 	_recalc_button.text = "Recalculate Polygons"
 	_recalc_button.tooltip_text = "Re-triangulate the Polygon2D from its existing points (points unchanged)."
 	_recalc_button.pressed.connect(_on_recalculate_pressed)
-	vb.add_child(_recalc_button)
+	box.add_child(_recalc_button)
 
 	_subdivide_button = Button.new()
 	_subdivide_button.text = "Subdivide Mesh"
 	_subdivide_button.tooltip_text = "Split every triangle edge at its midpoint (denser mesh). New vertices inherit averaged UV and bone weights, so the rig is preserved."
 	_subdivide_button.pressed.connect(_on_subdivide_pressed)
-	vb.add_child(_subdivide_button)
+	box.add_child(_subdivide_button)
 
-	_status_label = RichTextLabel.new()
-	_status_label.fit_content = true
-	_status_label.bbcode_enabled = true
-	_status_label.custom_minimum_size = Vector2(0, 60)
-	vb.add_child(_status_label)
+	_copy_uv_button = Button.new()
+	_copy_uv_button.text = "Copy Polygon to UV"
+	_copy_uv_button.tooltip_text = "Set the Polygon2D's uv to a copy of its polygon points (same as the UV editor's Copy Polygon to UV). Needed for texture mapping after editing points."
+	_copy_uv_button.pressed.connect(_on_copy_uv_pressed)
+	box.add_child(_copy_uv_button)
 
 
 func _add_spin(parent: Node, label_text: String, min_v: float, max_v: float, step: float, value: float) -> SpinBox:
@@ -196,10 +277,15 @@ func _refresh_selection() -> void:
 	var selected := _editor_interface.get_selection().get_selected_nodes()
 	_target = null
 	_skeleton = null
+	_sprite = null
 	for node in selected:
-		if node is Polygon2D:
+		if node is Polygon2D and _target == null:
 			_target = node
-			break
+		elif node is Sprite2D and _sprite == null:
+			_sprite = node
+
+	# Auto-mesh only needs a Sprite2D with a texture; independent of the target.
+	_gen_mesh_button.disabled = _sprite == null or _sprite.texture == null
 
 	if _target == null:
 		_target_label.text = "Target: (select a Polygon2D)"
@@ -208,11 +294,13 @@ func _refresh_selection() -> void:
 		_smooth_button.disabled = true
 		_recalc_button.disabled = true
 		_subdivide_button.disabled = true
+		_copy_uv_button.disabled = true
 		return
 
 	_target_label.text = "Target: %s (%d verts)" % [_target.name, _target.polygon.size()]
 	_recalc_button.disabled = _target.polygon.size() < 3
 	_subdivide_button.disabled = _target.polygon.size() < 3
+	_copy_uv_button.disabled = _target.polygon.is_empty()
 	_smooth_button.disabled = _target.get_bone_count() == 0
 
 	# Resolve skeleton from Polygon2D.skeleton NodePath.
@@ -509,6 +597,132 @@ func _apply_bones(poly: Polygon2D, flat: Array) -> void:
 	while i + 1 < flat.size():
 		poly.add_bone(flat[i], flat[i + 1])
 		i += 2
+
+
+func _on_copy_uv_pressed() -> void:
+	if _target == null:
+		_set_status("[color=orange]No Polygon2D selected.[/color]")
+		return
+	if _target.polygon.is_empty():
+		_set_status("[color=orange]Polygon has no points.[/color]")
+		return
+
+	var new_uv := _target.polygon.duplicate()
+	var prev_uv := _target.uv.duplicate()
+
+	_undo_redo.create_action("Polygon Tools: Copy Polygon to UV")
+	_undo_redo.add_do_property(_target, "uv", new_uv)
+	_undo_redo.add_undo_property(_target, "uv", prev_uv)
+	_undo_redo.commit_action()
+
+	_set_status("[color=green]Copied polygon to UV.[/color] %d points." % new_uv.size())
+
+
+func _on_create_skeleton_pressed() -> void:
+	if _editor_interface == null:
+		return
+	var root := _editor_interface.get_edited_scene_root()
+	if root == null:
+		_set_status("[color=orange]Open a scene first.[/color]")
+		return
+
+	var ids := AutoWeightSkeletonTemplates.template_ids()
+	var idx: int = clampi(_template_option.selected, 0, ids.size() - 1)
+	var id: String = ids[idx]
+	var bounds := _selected_bounds()
+	var skel := AutoWeightSkeletonTemplates.build(id, bounds, int(_segments_spin.value))
+	if skel == null:
+		_set_status("[color=red]Could not build template '%s'.[/color]" % id)
+		return
+
+	_undo_redo.create_action("Polygon Tools: Create Skeleton")
+	_undo_redo.add_do_method(root, "add_child", skel)
+	_undo_redo.add_do_method(self, "_set_owner_recursive", skel, root)
+	_undo_redo.add_do_reference(skel)
+	_undo_redo.add_undo_method(root, "remove_child", skel)
+	_undo_redo.commit_action()
+
+	var bone_count := AutoWeightBoneHeatSolver.collect_bones(skel).size()
+	_set_status("[color=green]Created %s[/color] (%d bones)." % [skel.name, bone_count])
+
+
+func _on_generate_mesh_pressed() -> void:
+	if _sprite == null or _sprite.texture == null:
+		_set_status("[color=orange]Select a Sprite2D with a texture.[/color]")
+		return
+	var img := _sprite.texture.get_image()
+	if img == null:
+		_set_status("[color=red]Texture has no readable image.[/color]")
+		return
+
+	var params := {
+		"alpha_threshold": _alpha_spin.value,
+		"simplify_epsilon": _simplify_spin.value,
+		"min_area": _min_area_spin.value,
+		"split_parts": _split_check.button_pressed,
+	}
+	var parts := AutoWeightAutoMesher.generate(img, params)
+	if parts.is_empty():
+		_set_status("[color=orange]No opaque regions found (adjust alpha / min area).[/color]")
+		return
+
+	var root := _editor_interface.get_edited_scene_root()
+	var parent: Node = _sprite.get_parent()
+	if parent == null:
+		parent = root
+	var tex_size := Vector2(img.get_width(), img.get_height())
+	# Points are in texture pixel space; shift so pixel (0,0) lands at the
+	# texture's top-left, matching how the Sprite2D draws it.
+	var offset := _sprite.offset - (tex_size * 0.5 if _sprite.centered else Vector2.ZERO)
+
+	var container := Node2D.new()
+	container.name = "AutoMesh"
+	container.transform = _sprite.transform
+	for i in parts.size():
+		var part = parts[i]
+		var poly := Polygon2D.new()
+		poly.name = "Part%d" % (i + 1)
+		poly.texture = _sprite.texture
+		poly.offset = offset
+		poly.polygon = part.points
+		poly.uv = part.uv
+		poly.polygons = part.polygons
+		container.add_child(poly)
+
+	_undo_redo.create_action("Polygon Tools: Generate Mesh")
+	_undo_redo.add_do_method(parent, "add_child", container)
+	_undo_redo.add_do_method(self, "_set_owner_recursive", container, root)
+	_undo_redo.add_do_reference(container)
+	_undo_redo.add_undo_method(parent, "remove_child", container)
+	_undo_redo.commit_action()
+
+	_set_status("[color=green]Generated %d part(s)[/color] under AutoMesh." % parts.size())
+
+
+## Scene-space bounds of the selected Polygon2D (preferred) or Sprite2D, used to
+## scale a spawned skeleton template. Empty Rect2 = use the template default size.
+## Rotation/scale of the node are ignored (only origin + local extents).
+func _selected_bounds() -> Rect2:
+	if _target != null and _target.polygon.size() >= 2:
+		var pts := _target.polygon
+		var mn := pts[0]
+		var mx := pts[0]
+		for p in pts:
+			mn = mn.min(p)
+			mx = mx.max(p)
+		return Rect2(_target.to_global(mn), mx - mn)
+	if _sprite != null and _sprite.texture != null:
+		var r := _sprite.get_rect()
+		return Rect2(_sprite.to_global(r.position), r.size)
+	return Rect2()
+
+
+## Assign `owner_root` to a freshly-added subtree so it saves into the scene.
+func _set_owner_recursive(node: Node, owner_root: Node) -> void:
+	if node != owner_root and node.owner == null:
+		node.owner = owner_root
+	for child in node.get_children():
+		_set_owner_recursive(child, owner_root)
 
 
 func _set_status(bbcode: String) -> void:
